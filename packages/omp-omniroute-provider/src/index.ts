@@ -7,8 +7,10 @@
 //     is gone, replaced by the native `fetchDynamicModels` factory.
 //   - settings edits go through omp's built-in `ui.select` / `ui.input`
 //     dialogs instead of a custom TUI overlay component.
-//   - streaming needs no `stream`/`streamSimple` wrappers: the pi build used
-//     them only to inject telemetry, which omp cannot surface (see NOTES).
+//   - streaming goes through a custom api (`omniroute-openai-completions`) so
+//     the response body can be mirrored for OmniRoute's out-of-band cost
+//     telemetry; the real request is still the built-in openai-completions
+//     call (see src/telemetry/stream-bridge.ts).
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
@@ -24,6 +26,8 @@ import {
 } from "./config.ts";
 import { probeGateway, runLoginWizard } from "./login.ts";
 import { createProviderConfig, OMNIROUTE_API_KEY_ENV, PROVIDER_ID, PROVIDER_NAME } from "./provider.ts";
+import { formatTelemetryReport, telemetryLog } from "./telemetry/cost.ts";
+import { omnirouteStreamSimple } from "./telemetry/pi-ai.ts";
 import { resolveApiKey } from "./tools/http.ts";
 import { createFetchTool, FETCH_PROVIDERS, normalizeFetchProvider } from "./tools/web-fetch.ts";
 import { createSearchTool } from "./tools/search.ts";
@@ -52,7 +56,7 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
   // `const providerBaseUrl = config.baseUrl ?? ""`), so the provider object is
   // rebuilt whenever the host changes instead of relying on the live getter.
   function registerProvider(): void {
-    pi.registerProvider(PROVIDER_ID, createProviderConfig(currentBaseUrl));
+    pi.registerProvider(PROVIDER_ID, createProviderConfig(currentBaseUrl, omnirouteStreamSimple));
   }
 
   function applyBaseUrl(): void {
@@ -87,6 +91,13 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
     configFetchProvider = normalizeFetchProvider(config.fetch?.provider);
     // Re-read after a profile switch or an external file edit.
     applyBaseUrl();
+  });
+
+  pi.registerCommand("omniroute-usage", {
+    description: "Show OmniRoute cost/token telemetry for recent responses",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      ctx.ui.notify(formatTelemetryReport(telemetryLog, 10), "info");
+    },
   });
 
   pi.registerCommand("omniroute-settings", {

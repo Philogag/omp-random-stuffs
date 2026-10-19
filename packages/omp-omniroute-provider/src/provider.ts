@@ -9,7 +9,16 @@ import type { ProviderConfig, ProviderModelConfig } from "@oh-my-pi/pi-coding-ag
 
 export const PROVIDER_ID = "omniroute";
 export const PROVIDER_NAME = "OmniRoute";
-export const PROVIDER_API = "openai-completions";
+/**
+ * The api id the provider registers under.
+ *
+ * It must NOT be a built-in api name: `registerCustomApi` rejects those
+ * (`api-registry.ts` `assertCustomApiName`), and a custom api is the only way
+ * to supply `streamSimple` — which is how OmniRoute's out-of-band cost
+ * telemetry reaches the message. The request itself still goes out over
+ * `openai-completions`; only the dispatch key differs.
+ */
+export const PROVIDER_API = "omniroute-openai-completions";
 
 /** Env var name — omp resolves `apiKey` below stored /login credentials. */
 export const OMNIROUTE_API_KEY_ENV = "OMNIROUTE_API_KEY";
@@ -75,8 +84,9 @@ export function toProviderModel(entry: OmnirouteModelEntry): ProviderModelConfig
         ? OMNIROUTE_THINKING
         : undefined,
     input: vision ? ["text", "image"] : ["text"],
-    // OmniRoute bills per request and reports the actual amount out-of-band;
-    // per-token prices are not exposed by its catalog.
+    // OmniRoute bills per request and reports the actual amount out-of-band
+    // (see src/telemetry/), so the catalog carries no per-token prices. These
+    // zeros are the seed the telemetry overwrites on every response.
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: pickInt(entry.max_input_tokens, entry.context_length) ?? DEFAULT_CONTEXT_WINDOW,
     maxTokens: pickInt(entry.max_output_tokens) ?? DEFAULT_MAX_TOKENS,
@@ -110,7 +120,10 @@ export async function fetchOmnirouteModels(
   return models;
 }
 
-export function createProviderConfig(resolveCurrentBaseUrl: () => string): ProviderConfig {
+export function createProviderConfig(
+  resolveCurrentBaseUrl: () => string,
+  streamSimple?: ProviderConfig["streamSimple"],
+): ProviderConfig {
   return {
     // Live getter rather than the value at registration time, so a base-URL edit
     // from `/omniroute-settings` applies to the next request without the provider
@@ -119,6 +132,9 @@ export function createProviderConfig(resolveCurrentBaseUrl: () => string): Provi
       return resolveCurrentBaseUrl();
     },
     api: PROVIDER_API,
+    // Injected rather than imported so this module (and its tests) never loads
+    // the harness at runtime; `src/telemetry/pi-ai.ts` owns that import.
+    ...(streamSimple ? { streamSimple } : {}),
     // Registered as a fallback rank below stored OAuth / `/login` keys, so an
     // interactive login wins over an exported env var.
     apiKey: OMNIROUTE_API_KEY_ENV,

@@ -23,14 +23,16 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "node --test 'test/**/*.test.ts'",
-    "prepublishOnly": "pnpm run typecheck && pnpm run test"
-  },
-  "dependencies": {},
-  "peerDependencies": {
-    "@oh-my-pi/pi-coding-agent": "*"
+    "prepublishOnly": "pnpm run typecheck && pnpm run test",
+    "test:integration": "bun test/integration/stream-probe.ts"
   },
   "devDependencies": {
+    "@oh-my-pi/pi-ai": "^18.12.2",
     "@oh-my-pi/pi-coding-agent": "^18.12.2",
     "@types/node": "^22.20.1"
+  },
+  "peerDependencies": {
+    "@oh-my-pi/pi-coding-agent": "*",
+    "@oh-my-pi/pi-ai": "*"
   }
 }

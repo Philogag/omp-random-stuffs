@@ -25,6 +25,7 @@ import {
   toProviderModel,
 } from "../src/provider.ts";
 import { AUTH_PASTE, AUTH_SKIP, probeGateway, runLoginWizard } from "../src/login.ts";
+import { BUILTIN_OPENAI_API } from "../src/telemetry/stream-bridge.ts";
 import { buildSearchBody, formatSearchResults, isValidProvider } from "../src/tools/search.ts";
 import {
   SearchCatalogError,
@@ -41,8 +42,25 @@ function tempConfigDir(t: { after: (fn: () => void) => void }): string {
 
 test("provider identity", () => {
   assert.equal(PROVIDER_ID, "omniroute");
-  assert.equal(PROVIDER_API, "openai-completions");
+  // Custom api id: built-in names are reserved by `registerCustomApi`, and a
+  // custom api is how `streamSimple` (and thus cost telemetry) gets attached.
+  assert.equal(PROVIDER_API, "omniroute-openai-completions");
+  assert.notEqual(PROVIDER_API, BUILTIN_OPENAI_API);
   assert.equal(OMNIROUTE_API_KEY_ENV, "OMNIROUTE_API_KEY");
+});
+
+test("provider config wires the injected streamSimple and the custom api", () => {
+  const streamSimple = () => ({}) as never;
+  const config = createProviderConfig(() => "http://gateway.local/v1", streamSimple);
+  assert.equal(config.api, PROVIDER_API);
+  assert.equal(config.streamSimple, streamSimple);
+  assert.equal(config.baseUrl, "http://gateway.local/v1");
+
+  // Without an injected bridge the provider still registers (tests, dry runs).
+  const bare = createProviderConfig(() => "http://gateway.local/v1");
+  assert.equal(bare.streamSimple, undefined);
+  // Discovery models must use the same custom api id or dispatch misses them.
+  assert.equal(toProviderModel({ id: "m" }).api, PROVIDER_API);
 });
 
 test("config: search/fetch/base-url round-trip", (t) => {

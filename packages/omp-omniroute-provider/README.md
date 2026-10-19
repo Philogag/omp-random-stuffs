@@ -79,28 +79,59 @@ gateway dropped) is ignored rather than forwarded.
 | pi build | this port |
 | --- | --- |
 | `Provider` object with `getModels` + `refreshModels` | `ProviderConfig` with the native `fetchDynamicModels` factory (omp caches the catalog, 24 h TTL) |
-| provider `stream` / `streamSimple` wrappers carrying telemetry | removed — no telemetry injection needed |
+| provider `stream` / `streamSimple` wrappers carrying telemetry | rebuilt on a custom api (`omniroute-openai-completions`) — see [Cost telemetry](#cost-telemetry) |
 | settings via a custom TUI overlay component | omp's built-in `ui.select` / `ui.input` dialogs (live gateway catalog instead of a rendered SelectList) |
 | config in pi `settings.json` + `auth.json` | one extension-owned `omniroute.json` in the omp agent dir |
 | `typebox` package + `prepareArguments` hook | injected `pi.typebox` schema builder; argument defaults resolved in `execute` |
 | `defineTool` | plain `ToolDefinition` objects built by `createSearchTool` / `createFetchTool` |
 | env-var-only auth (`envApiKeyAuth`) | `/login-omniroute` wizard on top of omp's `authStorage.oauth.login`; `OMNIROUTE_API_KEY` stays the fallback rank |
 
-### What did not carry over
+## Cost telemetry
 
-**Usage telemetry is dropped.** The pi build wrapped streaming to read the
-`X-OmniRoute-*` response headers and rewrite the assistant message's cost.
-OmniRoute emits those values as trailing SSE comment lines inside the response
-body, omp's `after_provider_response` event only exposes status/headers, and
-omp's `assistant_message` rewrite hook cannot touch cost — so there is no place
-to surface them. Model rows therefore report zero per-token cost.
+OmniRoute bills per request and reports what it charged as `X-OmniRoute-*`
+**SSE comment lines inside the response body** (`: x-omniroute-response-cost=…`),
+not as headers. omp's `after_provider_response` only exposes status/headers and
+its assistant-message rewrite hook cannot touch cost, so the values are
+unreachable through the event surface.
+
+Instead the provider registers a **custom api**:
+
+```
+ProviderConfig.api = "omniroute-openai-completions"   // custom name — built-in names are reserved
+ProviderConfig.streamSimple → wraps the real openai-completions dispatch
+```
+
+On each request that means:
+
+1. `streamSimple` injects a byte-transparent `fetch` wrapper
+   (`src/telemetry/omniroute-telemetry.ts`) that mirrors the body through an
+   SSE-comment parser. The caller's stream is unchanged, byte for byte.
+2. The inner request runs on the real `openai-completions` api with the
+   original model, so nothing about the wire format changes.
+3. When the terminal event arrives, the parsed `response-cost` **overwrites**
+   `message.usage.cost.total` — never adds, since the session ledger sums
+   `usage.cost` verbatim and nothing recomputes it afterwards.
+
+Model rows still carry zero catalog prices; the session ledger learns the real
+number from the message. `/omniroute-usage` shows the last 10 responses (cost,
+tokens, tok/s, TTFT, cache hit) from a bounded in-memory log, because omp has no
+per-message diagnostics field to attach them to.
+
+Cost is only as good as the gateway report: an endpoint that streams without the
+comment block keeps the modeled (zero) price, and non-streaming paths are
+unaffected.
 
 ## Development
 
 ```bash
-pnpm run typecheck   # tsc --noEmit
-pnpm run test        # node --test (src/ imports are type-only, so no harness is loaded)
+pnpm run typecheck          # tsc --noEmit
+pnpm run test               # node --test — 36 unit tests, no harness loaded
+pnpm run test:integration   # bun — real pi-ai dispatch against a fake gateway
 ```
+
+`src/telemetry/pi-ai.ts` is the only module that imports the harness at
+runtime, so the unit suite never touches `@oh-my-pi/pi-ai` (whose entrypoint is
+TypeScript source and only loads under Bun).
 
 Layout: `src/provider.ts` (provider identity, model mapping, discovery),
 `src/config.ts` (agent-dir config store), `src/login.ts` (`/login-omniroute`
