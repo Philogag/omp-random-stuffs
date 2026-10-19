@@ -1,5 +1,5 @@
 {
-  "name": "@omp/omniroute-provider",
+  "name": "@philogag/omp-provider-omnirouter",
   "version": "0.1.0",
   "description": "OmniRoute (OpenAI-compatible) provider plus web search/fetch tools for oh-my-pi",
   "type": "module",

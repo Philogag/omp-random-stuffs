@@ -1,4 +1,4 @@
-# @omp/omniroute-provider
+# @philogag/omp-provider-omnirouter
 
 OmniRoute gateway support for [oh-my-pi](https://github.com/can1357/oh-my-pi) (`omp`):
 an OpenAI-compatible provider named `omniroute`, plus two tools —
