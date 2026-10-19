@@ -84,7 +84,7 @@ gateway dropped) is ignored rather than forwarded.
 | config in pi `settings.json` + `auth.json` | one extension-owned `omniroute.json` in the omp agent dir |
 | `typebox` package + `prepareArguments` hook | injected `pi.typebox` schema builder; argument defaults resolved in `execute` |
 | `defineTool` | plain `ToolDefinition` objects built by `createSearchTool` / `createFetchTool` |
-| env-var-only auth (`envApiKeyAuth`) | `/login-omniroute` wizard on top of omp's `authStorage.oauth.login`; `OMNIROUTE_API_KEY` stays the fallback rank |
+| env-var-only auth (`envApiKeyAuth`) | `/login-omniroute`, a one-step key prompt on top of omp's `authStorage.oauth.login`; `OMNIROUTE_API_KEY` stays the fallback rank |
 
 ## Cost telemetry
 
@@ -135,5 +135,6 @@ TypeScript source and only loads under Bun).
 
 Layout: `src/provider.ts` (provider identity, model mapping, discovery),
 `src/config.ts` (agent-dir config store), `src/login.ts` (`/login-omniroute`
-wizard), `src/tools/*` (HTTP helpers, the two tools, live search catalog),
+key prompt + gateway check), `src/tools/*` (HTTP helpers, the two tools, live
+search catalog), `src/telemetry/*` (cost telemetry),
 `src/index.ts` (extension entry, command handlers).

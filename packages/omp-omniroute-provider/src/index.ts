@@ -14,7 +14,6 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
-  OMNIROUTE_DEFAULT_BASE_URL,
   readConfig,
   resolveBaseUrl,
   resolveConfigPath,
@@ -133,26 +132,20 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("login-omniroute", {
-    description: "Guided OmniRoute setup: gateway URL, connectivity check, API key",
+    description: "Store an OmniRoute API key (one step)",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!ctx.hasUI) {
         ctx.ui.notify(
-          `OmniRoute base URL: ${baseUrl}. Set ${OMNIROUTE_API_KEY_ENV} and edit ${resolveConfigPath()} to change it here.`,
+          `Set ${OMNIROUTE_API_KEY_ENV} to authenticate. Base URL: ${baseUrl}. Config: ${resolveConfigPath()}`,
           "info",
         );
         return;
       }
       await runLoginWizard(ctx, {
         getBaseUrl: currentBaseUrl,
-        defaultBaseUrl: OMNIROUTE_DEFAULT_BASE_URL,
         configPath: resolveConfigPath,
-        validateBaseUrl: validateAndNormalizeBaseUrl,
         probe: probeGateway,
         getApiKey: () => resolveApiKey(ctx),
-        setBaseUrl: async (value) => {
-          setBaseUrl(value);
-          applyBaseUrl();
-        },
         login: () => loginThroughOmp(ctx),
         refreshModels: () => refreshModels(ctx),
       });

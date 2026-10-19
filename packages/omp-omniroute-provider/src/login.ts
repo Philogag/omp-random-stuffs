@@ -1,13 +1,11 @@
-// `/login-omniroute` — guided first-run setup.
+// `/login-omniroute` — one-step setup: ask for the API key, store it, verify.
 //
-// Three steps: point the extension at a gateway, check that the gateway answers,
-// then store an API key through omp's own credential pipeline (the same store
-// `/login` writes to). Everything is dependency-injected so the flow is testable
-// without a harness runtime.
+// Deliberately not a wizard. The gateway URL has a working default and lives in
+// `/omniroute-settings`, so the only thing standing between a fresh install and
+// a usable provider is the key. Everything is dependency-injected so the flow is
+// testable without a harness runtime.
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
-
-import { OMNIROUTE_API_KEY_ENV } from "./provider.ts";
 
 export interface GatewayProbe {
   readonly ok: boolean;
@@ -16,27 +14,20 @@ export interface GatewayProbe {
   readonly error?: string;
 }
 
-export const AUTH_PASTE = "Paste API key now (stored by omp)";
-export const AUTH_ENV = "I'll export OMNIROUTE_API_KEY myself";
-export const AUTH_SKIP = "Skip for now";
-
 const PROBE_TIMEOUT_MS = 8_000;
 
 export interface LoginWizardDeps {
   readonly getBaseUrl: () => string;
-  /** Persists `undefined` as "use the default"; rejects on an invalid URL. */
-  readonly setBaseUrl: (value: string | undefined) => Promise<void>;
   readonly getApiKey: () => Promise<string | undefined>;
   readonly probe: (baseUrl: string, apiKey: string | undefined) => Promise<GatewayProbe>;
-  /** Runs omp's OAuth/API-key login for this provider; resolves to a source label. */
+  /** Runs omp's API-key login for this provider; resolves to a source label. */
   readonly login: () => Promise<string | undefined>;
   readonly refreshModels: () => Promise<void>;
   readonly configPath: () => string;
-  readonly defaultBaseUrl: string;
-  readonly validateBaseUrl: (input: string) => string;
 }
 
 export interface LoginWizardResult {
+  /** The user abandoned the key prompt without storing anything. */
   readonly cancelled: boolean;
   readonly baseUrl: string;
   readonly authenticated: boolean;
@@ -71,106 +62,84 @@ export async function probeGateway(
   }
 }
 
+/**
+ * Asks for the key, then reports whether the gateway accepted it.
+ *
+ * The prompt itself belongs to omp (`authStorage.oauth.login`), so the key goes
+ * straight into the credential store `/login` uses and this extension never
+ * persists a secret. Skipped entirely when a key is already resolvable.
+ */
 export async function runLoginWizard(
   ctx: ExtensionContext,
   deps: LoginWizardDeps,
 ): Promise<LoginWizardResult> {
   const ui = ctx.ui;
-  const start = deps.getBaseUrl();
+  const baseUrl = deps.getBaseUrl();
 
-  ui.notify(
-    [
-      "OmniRoute setup",
-      `current base URL: ${start}`,
-      `config file: ${deps.configPath()}`,
-    ].join("\n"),
-    "info",
-  );
+  const existing = await deps.getApiKey();
+  let authenticated = existing !== undefined;
+  let cancelled = false;
 
-  // 1. Base URL -----------------------------------------------------------
-  const entered = await ui.input("OmniRoute base URL (blank = default)", start);
-  if (entered === undefined) return { cancelled: true, baseUrl: start, authenticated: false };
-
-  let nextBaseUrl: string;
-  try {
-    nextBaseUrl = deps.validateBaseUrl(entered);
-  } catch (err) {
-    ui.notify(err instanceof Error ? err.message : String(err), "error");
-    return { cancelled: false, baseUrl: start, authenticated: false };
-  }
-  const changed = nextBaseUrl !== start;
-  if (changed) {
+  if (authenticated) {
+    ui.notify("OmniRoute API key already configured — nothing to do.", "info");
+  } else {
     try {
-      await deps.setBaseUrl(nextBaseUrl === deps.defaultBaseUrl ? undefined : nextBaseUrl);
+      const source = await deps.login();
+      if (source === undefined) {
+        cancelled = true;
+      } else {
+        // Trust the store, not the login's return value: omp may resolve the
+        // key through its own serializer (env fallback, refresh, ...).
+        authenticated = (await deps.getApiKey()) !== undefined;
+        ui.notify(
+          authenticated ? `OmniRoute API key stored (${source})` : "Login finished without storing a key",
+          authenticated ? "info" : "warning",
+        );
+      }
     } catch (err) {
-      ui.notify(`Could not save the base URL: ${err instanceof Error ? err.message : String(err)}`, "error");
-      return { cancelled: false, baseUrl: start, authenticated: false };
+      cancelled = true;
+      ui.notify(`Login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
     }
   }
 
-  // 2. Reachability ------------------------------------------------------
-  const existingKey = await deps.getApiKey();
-  const probe = await deps.probe(nextBaseUrl, existingKey);
-  let keyKnown = existingKey !== undefined;
+  if (!authenticated) {
+    return { cancelled, baseUrl, authenticated: false };
+  }
 
-  if (probe.ok) {
-    ui.notify(`Gateway reachable — ${probe.modelCount ?? 0} models advertised`, "info");
-  } else if (probe.status === 401 || probe.status === 403) {
-    ui.notify("Gateway is up but rejected the request: an API key is required", "warning");
-  } else {
+  const probe = await deps.probe(baseUrl, await deps.getApiKey());
+  if (!probe.ok) {
+    const detail =
+      probe.status === 401 || probe.status === 403
+        ? "the gateway rejected the key"
+        : (probe.error ?? "unknown error");
     ui.notify(
-      `Could not reach ${nextBaseUrl}: ${probe.error ?? "unknown error"} — the URL was saved, fix it in /omniroute-settings`,
+      [
+        `Key stored, but ${baseUrl} did not accept it: ${detail}`,
+        "Check the base URL with /omniroute-settings, or re-run /login-omniroute to replace the key.",
+      ].join("\n"),
       "warning",
     );
+    return { cancelled: false, baseUrl, authenticated: true, ...(probe.modelCount !== undefined ? { modelCount: probe.modelCount } : {}) };
   }
 
-  // 3. Credentials -------------------------------------------------------
-  if (keyKnown) {
-    ui.notify("API key already configured (omp auth store or OMNIROUTE_API_KEY)", "info");
-  } else {
-    const choice = await ui.select("OmniRoute API key", [
-      { label: AUTH_PASTE, description: "Opens the dashboard URL, then asks for the key and stores it" },
-      { label: AUTH_ENV, description: `Export ${OMNIROUTE_API_KEY_ENV} in your shell profile and restart omp` },
-      { label: AUTH_SKIP, description: "Configure it later with /login omniroute" },
-    ]);
-    if (choice === AUTH_PASTE) {
-      try {
-        const source = await deps.login();
-        keyKnown = source !== undefined;
-        ui.notify(
-          keyKnown ? `API key stored (${source})` : "Login finished without storing a credential",
-          keyKnown ? "info" : "warning",
-        );
-      } catch (err) {
-        ui.notify(`Login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
-      }
-    } else if (choice === AUTH_ENV) {
-      ui.notify(`Set ${OMNIROUTE_API_KEY_ENV} in your environment, then restart omp`, "info");
-    }
-  }
-
-  // 4. Catalog -----------------------------------------------------------
   try {
     await deps.refreshModels();
   } catch (err) {
     ui.notify(`Model refresh failed: ${err instanceof Error ? err.message : String(err)}`, "warning");
   }
-  const after = await deps.probe(nextBaseUrl, keyKnown ? await deps.getApiKey() : undefined);
-  if (after.ok) {
-    ui.notify(
-      [
-        "OmniRoute is ready",
-        `${after.modelCount ?? 0} models available — pick one from the model selector`,
-        "Tune web search / web fetch providers with /omniroute-settings",
-      ].join("\n"),
-      "info",
-    );
-  }
+
+  ui.notify(
+    [
+      `OmniRoute is ready — ${probe.modelCount ?? 0} models available`,
+      "Pick one from the model selector; tune web search / web fetch with /omniroute-settings",
+    ].join("\n"),
+    "info",
+  );
 
   return {
     cancelled: false,
-    baseUrl: nextBaseUrl,
-    authenticated: keyKnown,
-    ...(after.modelCount !== undefined ? { modelCount: after.modelCount } : {}),
+    baseUrl,
+    authenticated: true,
+    ...(probe.modelCount !== undefined ? { modelCount: probe.modelCount } : {}),
   };
 }

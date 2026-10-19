@@ -24,7 +24,7 @@ import {
   fetchOmnirouteModels,
   toProviderModel,
 } from "../src/provider.ts";
-import { AUTH_PASTE, AUTH_SKIP, probeGateway, runLoginWizard } from "../src/login.ts";
+import { probeGateway, runLoginWizard } from "../src/login.ts";
 import { BUILTIN_OPENAI_API } from "../src/telemetry/stream-bridge.ts";
 import { buildSearchBody, formatSearchResults, isValidProvider } from "../src/tools/search.ts";
 import {
@@ -386,103 +386,110 @@ function fakeCtx(answers: { input?: Array<string | undefined>; select?: Array<st
 }
 
 function wizardDeps(overrides: Partial<Parameters<typeof runLoginWizard>[1]> = {}) {
-  const saved: Array<string | undefined> = [];
   const probes: Array<{ baseUrl: string; apiKey: string | undefined }> = [];
+  const counts = { logins: 0, refreshes: 0 };
   let key: string | undefined;
   const base: Parameters<typeof runLoginWizard>[1] = {
     getBaseUrl: () => "http://localhost:20128/v1",
-    defaultBaseUrl: OMNIROUTE_DEFAULT_BASE_URL,
     configPath: () => "/tmp/omniroute.json",
-    validateBaseUrl: validateAndNormalizeBaseUrl,
-    setBaseUrl: async (value) => {
-      saved.push(value);
-    },
     getApiKey: async () => key,
     probe: async (baseUrl, apiKey) => {
       probes.push({ baseUrl, apiKey });
       return { ok: true, status: 200, modelCount: 3 };
     },
     login: async () => {
+      counts.logins++;
       key = "stored-key";
       return "omp auth store";
     },
-    refreshModels: async () => {},
+    refreshModels: async () => {
+      counts.refreshes++;
+    },
     ...overrides,
   };
-  return { deps: base, saved, probes };
+  return { deps: base, probes, counts };
 }
 
-test("login wizard: saves the URL, then stores a key through omp", async () => {
-  const { ctx, notifications, selects } = fakeCtx({
-    input: ["http://gw.local:9000/v1/"],
-    select: [AUTH_PASTE],
-  });
-  const { deps, saved, probes } = wizardDeps();
+test("login: one step — asks for the key, verifies it, refreshes models", async () => {
+  const { ctx, notifications, selects, inputs } = fakeCtx({});
+  const { deps, probes, counts } = wizardDeps();
 
   const result = await runLoginWizard(ctx, deps);
 
-  assert.deepEqual(result, { cancelled: false, baseUrl: "http://gw.local:9000/v1", authenticated: true, modelCount: 3 });
-  assert.deepEqual(saved, ["http://gw.local:9000/v1"]);
-  assert.equal(probes.length, 2);
-  assert.equal(probes[0]?.apiKey, undefined);
-  assert.equal(probes[1]?.apiKey, "stored-key");
-  assert.equal(selects[0]?.[0], "OmniRoute API key");
-  assert.ok(notifications.some((n) => n.message.includes("Gateway reachable — 3 models")));
+  assert.deepEqual(result, { cancelled: false, baseUrl: "http://localhost:20128/v1", authenticated: true, modelCount: 3 });
+  // No wizard steps: the key prompt belongs to omp's own login flow.
+  assert.deepEqual(selects, []);
+  assert.deepEqual(inputs, []);
+  assert.deepEqual(counts, { logins: 1, refreshes: 1 });
+  assert.deepEqual(probes, [{ baseUrl: "http://localhost:20128/v1", apiKey: "stored-key" }]);
   assert.ok(notifications.some((n) => n.message.includes("API key stored (omp auth store)")));
-  assert.ok(notifications.some((n) => n.message.includes("OmniRoute is ready")));
+  assert.ok(notifications.some((n) => n.message.includes("OmniRoute is ready — 3 models available")));
 });
 
-test("login wizard: blank input falls back to the default URL", async () => {
-  const { ctx } = fakeCtx({ input: [""], select: [AUTH_SKIP] });
-  const { deps, saved } = wizardDeps({ getBaseUrl: () => "http://custom/v1" });
-
-  const result = await runLoginWizard(ctx, deps);
-
-  assert.equal(result.baseUrl, OMNIROUTE_DEFAULT_BASE_URL);
-  // undefined == "use the default", so the config key is cleared
-  assert.deepEqual(saved, [undefined]);
-});
-
-test("login wizard: cancelling the URL prompt aborts without saving", async () => {
-  const { ctx } = fakeCtx({ input: [undefined] });
-  const { deps, saved } = wizardDeps();
-
-  const result = await runLoginWizard(ctx, deps);
-
-  assert.equal(result.cancelled, true);
-  assert.deepEqual(saved, []);
-});
-
-test("login wizard: an invalid URL stops before anything is saved", async () => {
-  const { ctx, notifications } = fakeCtx({ input: ["not a url"] });
-  const { deps, saved } = wizardDeps();
-
-  const result = await runLoginWizard(ctx, deps);
-
-  assert.equal(result.cancelled, false);
-  assert.deepEqual(saved, []);
-  assert.ok(notifications.some((n) => n.type === "error" && n.message.includes("Invalid base URL")));
-});
-
-test("login wizard: an existing key skips the credential step", async () => {
-  const { ctx, selects, notifications } = fakeCtx({ input: ["http://localhost:20128/v1"] });
-  const { deps } = wizardDeps({ getApiKey: async () => "already-there" });
+test("login: an existing key skips the prompt and only verifies", async () => {
+  const { ctx, notifications } = fakeCtx({});
+  const { deps, probes, counts } = wizardDeps({ getApiKey: async () => "already-there" });
 
   const result = await runLoginWizard(ctx, deps);
 
   assert.equal(result.authenticated, true);
-  assert.equal(selects.length, 0);
-  assert.ok(notifications.some((n) => n.message.includes("API key already configured")));
+  assert.deepEqual(counts, { logins: 0, refreshes: 1 });
+  assert.deepEqual(probes, [{ baseUrl: "http://localhost:20128/v1", apiKey: "already-there" }]);
+  assert.ok(notifications.some((n) => n.message.includes("already configured")));
 });
 
-test("login wizard: a 401 gateway warns but keeps going", async () => {
-  const { ctx, notifications } = fakeCtx({ input: ["http://localhost:20128/v1"], select: [AUTH_SKIP] });
-  const { deps } = wizardDeps({ probe: async () => ({ ok: false, status: 401, error: "HTTP 401" }) });
+test("login: abandoning the key prompt reports cancelled and probes nothing", async () => {
+  const { ctx } = fakeCtx({});
+  const { deps, probes, counts } = wizardDeps({ login: async () => undefined });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.deepEqual(result, { cancelled: true, baseUrl: "http://localhost:20128/v1", authenticated: false });
+  assert.equal(probes.length, 0);
+  assert.equal(counts.refreshes, 0);
+});
+
+test("login: a failed login flow stops without probing", async () => {
+  const { ctx, notifications } = fakeCtx({});
+  const { deps, probes } = wizardDeps({
+    login: async () => {
+      throw new Error("user aborted the browser flow");
+    },
+  });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.cancelled, true);
+  assert.equal(result.authenticated, false);
+  assert.equal(probes.length, 0);
+  assert.ok(notifications.some((n) => n.type === "error" && n.message.includes("user aborted the browser flow")));
+});
+
+test("login: a login that stores nothing is not treated as authenticated", async () => {
+  const { ctx, notifications } = fakeCtx({});
+  const { deps, probes } = wizardDeps({
+    getApiKey: async () => undefined,
+    login: async () => "env",
+  });
 
   const result = await runLoginWizard(ctx, deps);
 
   assert.equal(result.authenticated, false);
-  assert.ok(notifications.some((n) => n.message.includes("an API key is required")));
+  assert.equal(probes.length, 0);
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("without storing a key")));
+});
+
+test("login: a rejected key warns but keeps the stored credential", async () => {
+  const { ctx, notifications } = fakeCtx({});
+  const { deps, counts } = wizardDeps({
+    probe: async () => ({ ok: false, status: 401, error: "HTTP 401" }),
+  });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.authenticated, true);
+  assert.equal(counts.refreshes, 0);
+  assert.ok(notifications.some((n) => n.type === "warning" && n.message.includes("the gateway rejected the key")));
 });
 
 test("probeGateway: status, model count, and transport errors stay distinct", async (t) => {
