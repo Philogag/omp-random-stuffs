@@ -1,0 +1,269 @@
+// Smoke tests for the omp port. Pure Node — no harness runtime is loaded, all
+// `@oh-my-pi/pi-coding-agent` imports in src/ are type-only.
+
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import {
+  OMNIROUTE_DEFAULT_BASE_URL,
+  readConfig,
+  resolveBaseUrl,
+  setBaseUrl,
+  setFetchProvider,
+  setSearchProvider,
+  validateAndNormalizeBaseUrl,
+} from "../src/config.ts";
+import {
+  OMNIROUTE_API_KEY_ENV,
+  PROVIDER_API,
+  PROVIDER_ID,
+  createProviderConfig,
+  fetchOmnirouteModels,
+  toProviderModel,
+} from "../src/provider.ts";
+import { buildSearchBody, formatSearchResults, isValidProvider } from "../src/tools/search.ts";
+import { buildFetchBody, extractFetchContent, normalizeFetchProvider } from "../src/tools/web-fetch.ts";
+
+function tempConfigDir(t: { after: (fn: () => void) => void }): string {
+  const dir = mkdtempSync(join(tmpdir(), "omp-omniroute-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return join(dir, "omniroute.json");
+}
+
+test("provider identity", () => {
+  assert.equal(PROVIDER_ID, "omniroute");
+  assert.equal(PROVIDER_API, "openai-completions");
+  assert.equal(OMNIROUTE_API_KEY_ENV, "OMNIROUTE_API_KEY");
+});
+
+test("config: search/fetch/base-url round-trip", (t) => {
+  const path = tempConfigDir(t);
+  assert.deepEqual(readConfig(path), {});
+
+  setSearchProvider("brave-search", path);
+  setFetchProvider("jina-reader", path);
+  setBaseUrl("http://gateway.local:9000/v1", path);
+
+  const config = readConfig(path);
+  assert.equal(config.search?.provider, "brave-search");
+  assert.equal(config.fetch?.provider, "jina-reader");
+  assert.equal(config.baseUrl, "http://gateway.local:9000/v1");
+  assert.equal(resolveBaseUrl(path), "http://gateway.local:9000/v1");
+
+  // undefined clears a key rather than writing a null
+  setSearchProvider(undefined, path);
+  setBaseUrl(undefined, path);
+  const cleared = readConfig(path);
+  assert.equal(cleared.search, undefined);
+  assert.equal(cleared.baseUrl, undefined);
+  assert.equal(cleared.fetch?.provider, "jina-reader");
+});
+
+test("config: base URL falls back to the default", (t) => {
+  const path = tempConfigDir(t);
+  const saved = process.env.OMNIROUTE_BASE_URL;
+  delete process.env.OMNIROUTE_BASE_URL;
+  t.after(() => {
+    if (saved !== undefined) process.env.OMNIROUTE_BASE_URL = saved;
+  });
+  assert.equal(resolveBaseUrl(path), OMNIROUTE_DEFAULT_BASE_URL);
+});
+
+test("config: validateAndNormalizeBaseUrl", () => {
+  assert.equal(validateAndNormalizeBaseUrl("  http://localhost:20128/v1  "), "http://localhost:20128/v1");
+  assert.equal(validateAndNormalizeBaseUrl(""), OMNIROUTE_DEFAULT_BASE_URL);
+  assert.throws(() => validateAndNormalizeBaseUrl("not a url"), /Invalid base URL/);
+  assert.throws(() => validateAndNormalizeBaseUrl("ftp://example.com"), /http\(s\)/);
+});
+
+test("toProviderModel: capability mapping", () => {
+  const full = toProviderModel({
+    id: "gpt-5",
+    name: "GPT-5",
+    max_input_tokens: 400_000,
+    max_output_tokens: 128_000,
+    capabilities: { reasoning: true, thinking: true, vision: true },
+  });
+  assert.equal(full.id, "gpt-5");
+  assert.equal(full.api, PROVIDER_API);
+  assert.equal(full.reasoning, true);
+  assert.deepEqual(full.thinking, { mode: "effort", efforts: ["minimal", "low", "medium", "high"] });
+  assert.deepEqual(full.input, ["text", "image"]);
+  assert.equal(full.contextWindow, 400_000);
+  assert.equal(full.maxTokens, 128_000);
+
+  const bare = toProviderModel({ id: "plain-model" });
+  assert.equal(bare.name, "plain-model");
+  assert.equal(bare.reasoning, false);
+  assert.equal(bare.thinking, undefined);
+  assert.deepEqual(bare.input, ["text"]);
+  assert.equal(bare.contextWindow, 128_000);
+  assert.equal(bare.maxTokens, 4_096);
+
+  // context_length is the fallback when max_input_tokens is absent/zero
+  const fallback = toProviderModel({ id: "m", context_length: 32_000, max_input_tokens: 0 });
+  assert.equal(fallback.contextWindow, 32_000);
+});
+
+test("fetchOmnirouteModels: auth header + row filtering", async (t) => {
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+    return new Response(JSON.stringify({ data: [{ id: "a" }, { id: "" }, { notAnId: true }, { id: "b" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  const models = await fetchOmnirouteModels("http://gateway/v1/", "secret-key");
+  assert.deepEqual(
+    models.map((m) => m.id),
+    ["a", "b"],
+  );
+  assert.equal(calls[0]?.url, "http://gateway/v1/models");
+  assert.equal(calls[0]?.headers.Authorization, "Bearer secret-key");
+
+  await fetchOmnirouteModels("http://gateway/v1", undefined);
+  assert.equal(calls[1]?.headers.Authorization, undefined);
+});
+
+test("fetchOmnirouteModels: non-2xx throws so omp keeps its cached catalog", async (t) => {
+  const original = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response("nope", { status: 503 })) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+  await assert.rejects(() => fetchOmnirouteModels("http://gateway/v1", undefined), /OmniRoute \/models failed: 503/);
+});
+
+test("createProviderConfig: live base URL, env key rank, oauth login, discovery", async () => {
+  let current = "http://first/v1";
+  const config = createProviderConfig(() => current);
+
+  assert.equal(config.baseUrl, "http://first/v1");
+  assert.equal(config.api, PROVIDER_API);
+  assert.equal(config.apiKey, OMNIROUTE_API_KEY_ENV);
+
+  // the getter must follow later base-URL edits without re-registration
+  current = "http://second/v1";
+  assert.equal(config.baseUrl, "http://second/v1");
+
+  const seen: Array<{ message: string; secret?: boolean }> = [];
+  const auth: Array<{ url: string }> = [];
+  const key = await config.oauth!.login({
+    onAuth: (info: { url: string }) => {
+      auth.push(info);
+    },
+    onPrompt: async (prompt: { message: string; secret?: boolean }) => {
+      seen.push(prompt);
+      return "  pasted-key  ";
+    },
+  } as never);
+  assert.equal(key, "pasted-key");
+  assert.equal(auth[0]?.url, "http://second");
+  assert.equal(seen[0]?.secret, true);
+
+  await assert.rejects(
+    () =>
+      config.oauth!.login({
+        onAuth: () => {},
+        onPrompt: async () => "   ",
+      } as never),
+    /No OmniRoute API key provided/,
+  );
+
+  assert.equal(typeof config.fetchDynamicModels, "function");
+});
+
+test("search: provider gating and body defaults", () => {
+  assert.equal(isValidProvider("brave-search"), true);
+  assert.equal(isValidProvider("auto"), false);
+  assert.equal(isValidProvider("nope"), false);
+  assert.equal(isValidProvider(undefined), false);
+
+  assert.deepEqual(buildSearchBody({ query: "hello" }), {
+    query: "hello",
+    max_results: 5,
+    search_type: "web",
+    offset: 0,
+    strict_filters: false,
+  });
+
+  const withExtras = buildSearchBody({
+    query: "q",
+    provider: "exa-search",
+    max_results: 3,
+    country: "US",
+    time_range: "week",
+    provider_options: { freshness: "pd" },
+  });
+  assert.equal(withExtras.provider, "exa-search");
+  assert.equal(withExtras.max_results, 3);
+  assert.equal(withExtras.country, "US");
+  assert.equal(withExtras.time_range, "week");
+  assert.deepEqual(withExtras.provider_options, { freshness: "pd" });
+  assert.equal("synthesis" in withExtras, false);
+});
+
+test("search: formatSearchResults", () => {
+  assert.equal(formatSearchResults({ results: [] }, "q"), "No results for query: q");
+  assert.equal(
+    formatSearchResults({ results: [{ title: "T", url: "https://x.test", snippet: "S" }] }, "q"),
+    "1. T\n   URL: https://x.test\n   S",
+  );
+  // untitled results still get a label
+  assert.equal(formatSearchResults({ results: [{ url: "https://y.test" }] }, "q"), "1. (untitled)\n   URL: https://y.test");
+  // non-result payloads fall back to JSON
+  assert.equal(formatSearchResults({ answer: "42" }, "q"), '{"answer":"42"}');
+});
+
+test("fetch: provider normalization and body defaults", () => {
+  assert.equal(normalizeFetchProvider("firecrawl"), "firecrawl");
+  assert.equal(normalizeFetchProvider("auto"), undefined);
+  assert.equal(normalizeFetchProvider("bogus"), undefined);
+  assert.equal(normalizeFetchProvider(undefined), undefined);
+
+  assert.deepEqual(buildFetchBody({ url: "https://example.com" }), {
+    url: "https://example.com",
+    format: "markdown",
+    depth: 0,
+    include_metadata: false,
+  });
+  const full = buildFetchBody({
+    url: "https://example.com",
+    provider: "tinyfish",
+    format: "html",
+    depth: 2,
+    wait_for_selector: "#main",
+    include_metadata: true,
+  });
+  assert.deepEqual(full, {
+    url: "https://example.com",
+    format: "html",
+    depth: 2,
+    include_metadata: true,
+    provider: "tinyfish",
+    wait_for_selector: "#main",
+  });
+});
+
+test("fetch: extractFetchContent", () => {
+  assert.equal(extractFetchContent({ content: "# hi" }), "# hi");
+  assert.equal(extractFetchContent({ content: { markdown: "md", text: "tx" } }), "md");
+  assert.equal(extractFetchContent({ content: { text: "tx" } }), "tx");
+  assert.equal(extractFetchContent({ markdown: "top-level" }), "top-level");
+  assert.equal(extractFetchContent({ html: "<p>x</p>" }), "<p>x</p>");
+  assert.equal(extractFetchContent({ other: 1 }), '{"other":1}');
+
+  const long = extractFetchContent({ content: "x".repeat(40_100) });
+  assert.ok(long.endsWith("[content truncated at 40000 chars]"));
+  assert.equal(long.length, 40_000 + "\n\n[content truncated at 40000 chars]".length);
+});

@@ -7,7 +7,8 @@ pnpm workspace monorepo.
 ```
 .
 ├── packages/
-│   └── core/            @omp/core — demo package, rename or replace
+│   ├── core/            @omp/core — demo package, rename or replace
+│   └── omp-omniroute-provider/  @omp/omniroute-provider — OmniRoute provider + web tools
 ├── pnpm-workspace.yaml  workspace globs (packages/*)
 ├── tsconfig.base.json   shared strict TypeScript settings
 └── .npmrc               engine-strict, workspace-first resolution
@@ -26,6 +27,7 @@ against the file that declares them, not the inheriting one.
 | `pnpm typecheck`   | typecheck without emitting                    |
 | `pnpm test`        | run tests in packages that define them        |
 | `pnpm -F @omp/core add <dep>` | add a dependency to one package     |
+| `pnpm -F @omp/omniroute-provider test` | run one package's tests    |
 
 ## Adding a package
 

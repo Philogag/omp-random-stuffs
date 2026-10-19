@@ -31,3 +31,6 @@ pnpm-debug.log*
 # misc
 .turbo/
 .cache/
+
+# kb index cache (rebuild with `kb index`)
+.pi/dashboard/kb/
