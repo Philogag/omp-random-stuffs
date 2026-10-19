@@ -25,6 +25,11 @@ import {
   toProviderModel,
 } from "../src/provider.ts";
 import { buildSearchBody, formatSearchResults, isValidProvider } from "../src/tools/search.ts";
+import {
+  SearchCatalogError,
+  resolveSearchCatalog,
+  searchProviderDescription,
+} from "../src/tools/search-catalog.ts";
 import { buildFetchBody, extractFetchContent, normalizeFetchProvider } from "../src/tools/web-fetch.ts";
 
 function tempConfigDir(t: { after: (fn: () => void) => void }): string {
@@ -266,4 +271,61 @@ test("fetch: extractFetchContent", () => {
   const long = extractFetchContent({ content: "x".repeat(40_100) });
   assert.ok(long.endsWith("[content truncated at 40000 chars]"));
   assert.equal(long.length, 40_000 + "\n\n[content truncated at 40000 chars]".length);
+});
+
+test("search catalog: parses the gateway list, keeps names out of labels", async (t) => {
+  const original = globalThis.fetch;
+  const calls: string[] = [];
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push(String(url));
+    assert.equal((init?.headers as Record<string, string> | undefined)?.Authorization, "Bearer k");
+    return new Response(
+      JSON.stringify({
+        data: [
+          { id: "brave-search", name: "Brave", search_types: ["web", "news"] },
+          { id: "tavily-search", name: "Tavily", search_types: ["web"] },
+        ],
+      }),
+      { status: 200 },
+    );
+  }) as typeof fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  const catalog = await resolveSearchCatalog("http://gw/v1", "k");
+  assert.equal(catalog.isFallback, false);
+  assert.deepEqual(
+    catalog.providers.map((p) => p.id),
+    ["brave-search", "tavily-search"],
+  );
+  assert.equal(calls[0], "http://gw/v1/search");
+  assert.equal(searchProviderDescription({ id: "brave-search", name: "Brave", search_types: ["web", "news"] }), "Brave · web, news");
+  assert.equal(searchProviderDescription({ id: "x", name: "x", search_types: [] }), "search types: web");
+});
+
+test("search catalog: degrades to the static list", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  const failures: unknown[] = [];
+  for (const responder of [
+    async () => new Response("nope", { status: 401 }),
+    async () => new Response("not json", { status: 200 }),
+    async () => new Response(JSON.stringify({ data: [] }), { status: 200 }),
+    async () => new Response(JSON.stringify({ data: [{ id: 1 }] }), { status: 200 }),
+  ]) {
+    globalThis.fetch = responder as unknown as typeof fetch;
+    const catalog = await resolveSearchCatalog("http://gw/v1", undefined, {
+      onError: (err) => failures.push(err),
+    });
+    assert.equal(catalog.isFallback, true);
+    assert.equal(catalog.providers.length, 14);
+    assert.equal(catalog.providers[0]?.id, "serper-search");
+    assert.deepEqual(catalog.providers[0]?.search_types, ["web"]);
+  }
+  assert.equal(failures.length, 4);
+  assert.ok(failures[0] instanceof SearchCatalogError);
 });

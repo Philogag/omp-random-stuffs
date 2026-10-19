@@ -22,8 +22,14 @@ import {
   validateAndNormalizeBaseUrl,
 } from "./config.ts";
 import { createProviderConfig, PROVIDER_ID, PROVIDER_NAME } from "./provider.ts";
+import { resolveApiKey } from "./tools/http.ts";
 import { createFetchTool, FETCH_PROVIDERS, normalizeFetchProvider } from "./tools/web-fetch.ts";
-import { createSearchTool, isValidProvider, SEARCH_PROVIDERS } from "./tools/search.ts";
+import { createSearchTool } from "./tools/search.ts";
+import {
+  resolveSearchCatalog,
+  searchProviderDescription,
+  type SearchCatalog,
+} from "./tools/search-catalog.ts";
 
 const AUTO_LABEL = "Auto — let OmniRoute choose";
 const BACK_LABEL = "← Back";
@@ -86,6 +92,10 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
           baseUrl = resolveBaseUrl();
           await refreshModels(ctx);
         },
+        loadSearchCatalog: async () =>
+          resolveSearchCatalog(currentBaseUrl(), await resolveApiKey(ctx), {
+            onError: (err) => pi.logger.warn("[omniroute] search catalog unavailable", { err: String(err) }),
+          }),
       });
     },
   });
@@ -107,6 +117,8 @@ export interface SettingsMenuDeps {
   setSearchProvider: (provider: string | undefined) => void;
   setFetchProvider: (provider: string | undefined) => void;
   setBaseUrl: (value: string | undefined) => Promise<void>;
+  /** Live gateway catalog for the search submenu; degrades to the static list. */
+  loadSearchCatalog: () => Promise<SearchCatalog>;
 }
 
 /** Two-level menu: root → provider list / base-URL prompt. Exported for tests. */
@@ -146,20 +158,19 @@ export async function runSettingsMenu(
     }
 
     if (target === "Web search provider") {
-      const choice = await ui.select(
-        "Web search provider",
-        providerOptions(SEARCH_PROVIDERS, deps.getSearchProvider(), isValidProvider),
-      );
+      const catalog = await deps.loadSearchCatalog();
+      const choice = await ui.select("Web search provider", searchProviderOptions(catalog, deps.getSearchProvider()));
       if (choice === undefined || choice === BACK_LABEL) continue;
       deps.setSearchProvider(choice === AUTO_LABEL ? undefined : choice);
-      ui.notify(`Web search provider: ${choice}`, "info");
+      const fallbackNote = catalog.isFallback ? " (offline list — gateway catalog unavailable)" : "";
+      ui.notify(`Web search provider: ${choice}${fallbackNote}`, catalog.isFallback ? "warning" : "info");
       continue;
     }
 
     if (target === "Web fetch provider") {
       const choice = await ui.select(
         "Web fetch provider",
-        providerOptions(FETCH_PROVIDERS, deps.getFetchProvider(), (v): v is string =>
+        idProviderOptions(FETCH_PROVIDERS, deps.getFetchProvider(), (v): v is string =>
           typeof v === "string" && (FETCH_PROVIDERS as readonly string[]).includes(v),
         ),
       );
@@ -170,14 +181,33 @@ export async function runSettingsMenu(
   }
 }
 
-function providerOptions(
+function autoOption(): { label: string; description: string } {
+  return { label: AUTO_LABEL, description: "Omit the provider and let OmniRoute route by config" };
+}
+
+/** Labels are provider ids: `ui.select` returns the label, so it must round-trip. */
+function searchProviderOptions(
+  catalog: SearchCatalog,
+  current: string | undefined,
+): Array<{ label: string; description?: string }> {
+  const options: Array<{ label: string; description?: string }> = [autoOption()];
+  for (const provider of catalog.providers) {
+    const description = searchProviderDescription(provider);
+    options.push({
+      label: provider.id,
+      description: current === provider.id ? `${description} · current` : description,
+    });
+  }
+  options.push({ label: BACK_LABEL });
+  return options;
+}
+
+function idProviderOptions(
   providers: readonly string[],
   current: string | undefined,
   isValid: (value: string | undefined) => value is string,
 ): Array<{ label: string; description?: string }> {
-  const options: Array<{ label: string; description?: string }> = [
-    { label: AUTO_LABEL, description: "Omit the provider and let OmniRoute route by config" },
-  ];
+  const options: Array<{ label: string; description?: string }> = [autoOption()];
   for (const provider of providers) {
     options.push({
       label: provider,

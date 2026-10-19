@@ -31,7 +31,10 @@ with an `omp.extensions` array (this package declares `"omp": { "extensions":
    dashboard and asks for an API key), or export `OMNIROUTE_API_KEY`. A stored
    `/login` key wins over the env var.
 3. Optional: `/omniroute-settings` opens a menu for the default web-search
-   provider, the default web-fetch provider, and the base URL.
+   provider, the default web-fetch provider, and the base URL. The search
+   submenu lists what the gateway actually has configured (`GET /search`) and
+   falls back to the static provider ids when the gateway is unreachable or the
+   request is unauthenticated.
 
 The extension config lives at `<agent dir>/omniroute.json`:
 
@@ -63,7 +66,7 @@ gateway dropped) is ignored rather than forwarded.
 | --- | --- |
 | `Provider` object with `getModels` + `refreshModels` | `ProviderConfig` with the native `fetchDynamicModels` factory (omp caches the catalog, 24 h TTL) |
 | provider `stream` / `streamSimple` wrappers carrying telemetry | removed — no telemetry injection needed |
-| settings via a custom TUI overlay component | omp's built-in `ui.select` / `ui.input` dialogs |
+| settings via a custom TUI overlay component | omp's built-in `ui.select` / `ui.input` dialogs (live gateway catalog instead of a rendered SelectList) |
 | config in pi `settings.json` + `auth.json` | one extension-owned `omniroute.json` in the omp agent dir |
 | `typebox` package + `prepareArguments` hook | injected `pi.typebox` schema builder; argument defaults resolved in `execute` |
 | `defineTool` | plain `ToolDefinition` objects built by `createSearchTool` / `createFetchTool` |
