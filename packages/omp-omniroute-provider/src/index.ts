@@ -12,6 +12,7 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import {
+  OMNIROUTE_DEFAULT_BASE_URL,
   readConfig,
   resolveBaseUrl,
   resolveConfigPath,
@@ -21,7 +22,8 @@ import {
   setSearchProvider,
   validateAndNormalizeBaseUrl,
 } from "./config.ts";
-import { createProviderConfig, PROVIDER_ID, PROVIDER_NAME } from "./provider.ts";
+import { probeGateway, runLoginWizard } from "./login.ts";
+import { createProviderConfig, OMNIROUTE_API_KEY_ENV, PROVIDER_ID, PROVIDER_NAME } from "./provider.ts";
 import { resolveApiKey } from "./tools/http.ts";
 import { createFetchTool, FETCH_PROVIDERS, normalizeFetchProvider } from "./tools/web-fetch.ts";
 import { createSearchTool } from "./tools/search.ts";
@@ -46,7 +48,26 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
   let configSearchProvider: string | undefined = readConfig().search?.provider;
   let configFetchProvider: string | undefined = readConfig().fetch?.provider;
 
-  pi.registerProvider(PROVIDER_ID, createProviderConfig(currentBaseUrl));
+  // omp snapshots `config.baseUrl` at registration (model-registry.ts:3624
+  // `const providerBaseUrl = config.baseUrl ?? ""`), so the provider object is
+  // rebuilt whenever the host changes instead of relying on the live getter.
+  function registerProvider(): void {
+    pi.registerProvider(PROVIDER_ID, createProviderConfig(currentBaseUrl));
+  }
+
+  function applyBaseUrl(): void {
+    const next = resolveBaseUrl();
+    if (next === baseUrl) return;
+    baseUrl = next;
+    try {
+      pi.unregisterProvider(PROVIDER_ID);
+    } catch (err) {
+      pi.logger.warn("[omniroute] unregister before re-register failed", { err: String(err) });
+    }
+    registerProvider();
+  }
+
+  registerProvider();
 
   const tools = [
     createSearchTool({ pi, getConfiguredProvider: () => configSearchProvider }),
@@ -65,7 +86,7 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
     configSearchProvider = config.search?.provider;
     configFetchProvider = normalizeFetchProvider(config.fetch?.provider);
     // Re-read after a profile switch or an external file edit.
-    baseUrl = resolveBaseUrl();
+    applyBaseUrl();
   });
 
   pi.registerCommand("omniroute-settings", {
@@ -89,7 +110,7 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
         },
         setBaseUrl: async (value) => {
           setBaseUrl(value);
-          baseUrl = resolveBaseUrl();
+          applyBaseUrl();
           await refreshModels(ctx);
         },
         loadSearchCatalog: async () =>
@@ -99,6 +120,57 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
       });
     },
   });
+
+  pi.registerCommand("login-omniroute", {
+    description: "Guided OmniRoute setup: gateway URL, connectivity check, API key",
+    handler: async (_args: string, ctx: ExtensionContext) => {
+      if (!ctx.hasUI) {
+        ctx.ui.notify(
+          `OmniRoute base URL: ${baseUrl}. Set ${OMNIROUTE_API_KEY_ENV} and edit ${resolveConfigPath()} to change it here.`,
+          "info",
+        );
+        return;
+      }
+      await runLoginWizard(ctx, {
+        getBaseUrl: currentBaseUrl,
+        defaultBaseUrl: OMNIROUTE_DEFAULT_BASE_URL,
+        configPath: resolveConfigPath,
+        validateBaseUrl: validateAndNormalizeBaseUrl,
+        probe: probeGateway,
+        getApiKey: () => resolveApiKey(ctx),
+        setBaseUrl: async (value) => {
+          setBaseUrl(value);
+          applyBaseUrl();
+        },
+        login: () => loginThroughOmp(ctx),
+        refreshModels: () => refreshModels(ctx),
+      });
+    },
+  });
+
+  /**
+   * Delegates to omp's credential pipeline (`authStorage.oauth.login`), which is
+   * the same store `/login` and `omp login omniroute` write to — so the key is
+   * picked up by `getApiKeyForProvider` without this extension storing secrets.
+   */
+  async function loginThroughOmp(ctx: ExtensionContext): Promise<string | undefined> {
+    await ctx.modelRegistry.authStorage.oauth.login(PROVIDER_ID, {
+      onAuth: (info) => {
+        ctx.ui.notify(
+          [info.instructions ?? "Create an API key in the OmniRoute dashboard", info.url].join("\n"),
+          "info",
+        );
+      },
+      onPrompt: async (prompt) => {
+        // omp's plain `ui.input` cannot mask entry, so the wizard says so up front.
+        const value = await ctx.ui.input(prompt.message, prompt.placeholder);
+        if (value === undefined) throw new Error("cancelled");
+        return value;
+      },
+    });
+    const key = await resolveApiKey(ctx);
+    return key === undefined ? undefined : "omp auth store";
+  }
 
   async function refreshModels(ctx: ExtensionContext): Promise<void> {
     try {

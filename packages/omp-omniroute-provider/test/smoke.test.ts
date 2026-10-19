@@ -24,6 +24,7 @@ import {
   fetchOmnirouteModels,
   toProviderModel,
 } from "../src/provider.ts";
+import { AUTH_PASTE, AUTH_SKIP, probeGateway, runLoginWizard } from "../src/login.ts";
 import { buildSearchBody, formatSearchResults, isValidProvider } from "../src/tools/search.ts";
 import {
   SearchCatalogError,
@@ -328,4 +329,164 @@ test("search catalog: degrades to the static list", async (t) => {
   }
   assert.equal(failures.length, 4);
   assert.ok(failures[0] instanceof SearchCatalogError);
+});
+
+// ---------------------------------------------------------------------------
+// /login-omniroute wizard
+
+interface FakeUi {
+  readonly notifications: Array<{ message: string; type?: string }>;
+  readonly selects: Array<readonly string[]>;
+  readonly inputs: string[];
+}
+
+function fakeCtx(answers: { input?: Array<string | undefined>; select?: Array<string | undefined> }): FakeUi & {
+  ctx: never;
+} {
+  const notifications: Array<{ message: string; type?: string }> = [];
+  const selects: Array<readonly string[]> = [];
+  const inputs: string[] = [];
+  let inputIndex = 0;
+  let selectIndex = 0;
+  const ctx = {
+    hasUI: true,
+    ui: {
+      notify: (message: string, type?: string) => {
+        notifications.push({ message, type });
+      },
+      input: async (title: string) => {
+        inputs.push(title);
+        return answers.input?.[inputIndex++];
+      },
+      select: async (title: string, options: Array<{ label: string }>) => {
+        selects.push([title, ...options.map((option) => option.label)]);
+        return answers.select?.[selectIndex++];
+      },
+    },
+  };
+  return { notifications, selects, inputs, ctx: ctx as never };
+}
+
+function wizardDeps(overrides: Partial<Parameters<typeof runLoginWizard>[1]> = {}) {
+  const saved: Array<string | undefined> = [];
+  const probes: Array<{ baseUrl: string; apiKey: string | undefined }> = [];
+  let key: string | undefined;
+  const base: Parameters<typeof runLoginWizard>[1] = {
+    getBaseUrl: () => "http://localhost:20128/v1",
+    defaultBaseUrl: OMNIROUTE_DEFAULT_BASE_URL,
+    configPath: () => "/tmp/omniroute.json",
+    validateBaseUrl: validateAndNormalizeBaseUrl,
+    setBaseUrl: async (value) => {
+      saved.push(value);
+    },
+    getApiKey: async () => key,
+    probe: async (baseUrl, apiKey) => {
+      probes.push({ baseUrl, apiKey });
+      return { ok: true, status: 200, modelCount: 3 };
+    },
+    login: async () => {
+      key = "stored-key";
+      return "omp auth store";
+    },
+    refreshModels: async () => {},
+    ...overrides,
+  };
+  return { deps: base, saved, probes };
+}
+
+test("login wizard: saves the URL, then stores a key through omp", async () => {
+  const { ctx, notifications, selects } = fakeCtx({
+    input: ["http://gw.local:9000/v1/"],
+    select: [AUTH_PASTE],
+  });
+  const { deps, saved, probes } = wizardDeps();
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.deepEqual(result, { cancelled: false, baseUrl: "http://gw.local:9000/v1", authenticated: true, modelCount: 3 });
+  assert.deepEqual(saved, ["http://gw.local:9000/v1"]);
+  assert.equal(probes.length, 2);
+  assert.equal(probes[0]?.apiKey, undefined);
+  assert.equal(probes[1]?.apiKey, "stored-key");
+  assert.equal(selects[0]?.[0], "OmniRoute API key");
+  assert.ok(notifications.some((n) => n.message.includes("Gateway reachable — 3 models")));
+  assert.ok(notifications.some((n) => n.message.includes("API key stored (omp auth store)")));
+  assert.ok(notifications.some((n) => n.message.includes("OmniRoute is ready")));
+});
+
+test("login wizard: blank input falls back to the default URL", async () => {
+  const { ctx } = fakeCtx({ input: [""], select: [AUTH_SKIP] });
+  const { deps, saved } = wizardDeps({ getBaseUrl: () => "http://custom/v1" });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.baseUrl, OMNIROUTE_DEFAULT_BASE_URL);
+  // undefined == "use the default", so the config key is cleared
+  assert.deepEqual(saved, [undefined]);
+});
+
+test("login wizard: cancelling the URL prompt aborts without saving", async () => {
+  const { ctx } = fakeCtx({ input: [undefined] });
+  const { deps, saved } = wizardDeps();
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.cancelled, true);
+  assert.deepEqual(saved, []);
+});
+
+test("login wizard: an invalid URL stops before anything is saved", async () => {
+  const { ctx, notifications } = fakeCtx({ input: ["not a url"] });
+  const { deps, saved } = wizardDeps();
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.cancelled, false);
+  assert.deepEqual(saved, []);
+  assert.ok(notifications.some((n) => n.type === "error" && n.message.includes("Invalid base URL")));
+});
+
+test("login wizard: an existing key skips the credential step", async () => {
+  const { ctx, selects, notifications } = fakeCtx({ input: ["http://localhost:20128/v1"] });
+  const { deps } = wizardDeps({ getApiKey: async () => "already-there" });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.authenticated, true);
+  assert.equal(selects.length, 0);
+  assert.ok(notifications.some((n) => n.message.includes("API key already configured")));
+});
+
+test("login wizard: a 401 gateway warns but keeps going", async () => {
+  const { ctx, notifications } = fakeCtx({ input: ["http://localhost:20128/v1"], select: [AUTH_SKIP] });
+  const { deps } = wizardDeps({ probe: async () => ({ ok: false, status: 401, error: "HTTP 401" }) });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.authenticated, false);
+  assert.ok(notifications.some((n) => n.message.includes("an API key is required")));
+});
+
+test("probeGateway: status, model count, and transport errors stay distinct", async (t) => {
+  const original = globalThis.fetch;
+  t.after(() => {
+    globalThis.fetch = original;
+  });
+
+  globalThis.fetch = (async () => new Response("{}", { status: 401 })) as unknown as typeof fetch;
+  assert.deepEqual(await probeGateway("http://gw/v1", undefined), { ok: false, status: 401, error: "HTTP 401" });
+
+  const calls: Array<{ url: string; headers: Record<string, string> }> = [];
+  globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+    return new Response(JSON.stringify({ data: [{ id: "a" }, { id: "b" }] }), { status: 200 });
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await probeGateway("http://gw/v1/", "k"), { ok: true, status: 200, modelCount: 2 });
+  assert.equal(calls[0]?.url, "http://gw/v1/models");
+  assert.equal(calls[0]?.headers.Authorization, "Bearer k");
+
+  globalThis.fetch = (async () => {
+    throw new Error("ECONNREFUSED");
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await probeGateway("http://gw/v1", undefined), { ok: false, error: "ECONNREFUSED" });
 });

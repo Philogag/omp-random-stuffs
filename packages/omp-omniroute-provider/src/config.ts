@@ -148,5 +148,7 @@ export function validateAndNormalizeBaseUrl(input: string): string {
     console.warn(`[omniroute] base URL ${JSON.stringify(trimmed)} does not end with /v1 — chat calls may 404`);
   }
 
-  return trimmed;
+  // Every request builder already strips trailing slashes; normalize here too so
+  // "changed the URL" comparisons and saved config entries stay canonical.
+  return trimmed.replace(/\/+$/, "");
 }
