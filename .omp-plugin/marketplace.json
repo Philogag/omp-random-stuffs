@@ -1,0 +1,26 @@
+{
+  "name": "omp-random-stuffs",
+  "owner": {
+    "name": "Philogag"
+  },
+  "metadata": {
+    "description": "oh-my-pi extensions by Philogag",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "omniroute-provider",
+      "source": "./packages/omp-omniroute-provider",
+      "description": "OmniRoute (OpenAI-compatible) provider plus web search/fetch tools for oh-my-pi",
+      "version": "0.1.0",
+      "author": {
+        "name": "Philogag"
+      },
+      "homepage": "https://github.com/Philogag/omp-random-stuffs/tree/main/packages/omp-omniroute-provider",
+      "repository": "https://github.com/Philogag/omp-random-stuffs",
+      "license": "MIT",
+      "keywords": ["omniroute", "provider", "web-search", "web-fetch"],
+      "category": "providers"
+    }
+  ]
+}
