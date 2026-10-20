@@ -426,16 +426,24 @@ test("login: one step — asks for the key, verifies it, refreshes models", asyn
   assert.ok(notifications.some((n) => n.message.includes("OmniRoute is ready — 3 models available")));
 });
 
-test("login: an existing key skips the prompt and only verifies", async () => {
+test("login: an existing key is replaced — the prompt always runs", async () => {
   const { ctx, notifications } = fakeCtx({});
-  const { deps, probes, counts } = wizardDeps({ getApiKey: async () => "already-there" });
+  let key = "old-key";
+  const { deps, probes, counts } = wizardDeps({
+    getApiKey: async () => key,
+    login: async () => {
+      counts.logins++;
+      key = "new-key";
+      return "omp auth store";
+    },
+  });
 
   const result = await runLoginWizard(ctx, deps);
 
   assert.equal(result.authenticated, true);
-  assert.deepEqual(counts, { logins: 0, refreshes: 1 });
-  assert.deepEqual(probes, [{ baseUrl: "http://localhost:20128/v1", apiKey: "already-there" }]);
-  assert.ok(notifications.some((n) => n.message.includes("already configured")));
+  assert.deepEqual(counts, { logins: 1, refreshes: 1 });
+  assert.deepEqual(probes, [{ baseUrl: "http://localhost:20128/v1", apiKey: "new-key" }]);
+  assert.ok(notifications.some((n) => n.message.includes("API key stored (omp auth store)")));
 });
 
 test("login: abandoning the key prompt reports cancelled and probes nothing", async () => {

@@ -20,7 +20,10 @@ export interface LoginWizardDeps {
   readonly getBaseUrl: () => string;
   readonly getApiKey: () => Promise<string | undefined>;
   readonly probe: (baseUrl: string, apiKey: string | undefined) => Promise<GatewayProbe>;
-  /** Runs omp's API-key login for this provider; resolves to a source label. */
+  /**
+   * Runs omp's API-key login for this provider, replacing any stored key;
+   * resolves to a source label.
+   */
   readonly login: () => Promise<string | undefined>;
   readonly refreshModels: () => Promise<void>;
   readonly configPath: () => string;
@@ -67,7 +70,7 @@ export async function probeGateway(
  *
  * The prompt itself belongs to omp (`authStorage.oauth.login`), so the key goes
  * straight into the credential store `/login` uses and this extension never
- * persists a secret. Skipped entirely when a key is already resolvable.
+ * persists a secret. Always prompts, so an existing key can be replaced.
  */
 export async function runLoginWizard(
   ctx: ExtensionContext,
@@ -76,30 +79,25 @@ export async function runLoginWizard(
   const ui = ctx.ui;
   const baseUrl = deps.getBaseUrl();
 
-  const existing = await deps.getApiKey();
-  let authenticated = existing !== undefined;
+  let authenticated = false;
   let cancelled = false;
 
-  if (authenticated) {
-    ui.notify("OmniRoute API key already configured — nothing to do.", "info");
-  } else {
-    try {
-      const source = await deps.login();
-      if (source === undefined) {
-        cancelled = true;
-      } else {
-        // Trust the store, not the login's return value: omp may resolve the
-        // key through its own serializer (env fallback, refresh, ...).
-        authenticated = (await deps.getApiKey()) !== undefined;
-        ui.notify(
-          authenticated ? `OmniRoute API key stored (${source})` : "Login finished without storing a key",
-          authenticated ? "info" : "warning",
-        );
-      }
-    } catch (err) {
+  try {
+    const source = await deps.login();
+    if (source === undefined) {
       cancelled = true;
-      ui.notify(`Login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    } else {
+      // Trust the store, not the login's return value: omp may resolve the
+      // key through its own serializer (env fallback, refresh, ...).
+      authenticated = (await deps.getApiKey()) !== undefined;
+      ui.notify(
+        authenticated ? `OmniRoute API key stored (${source})` : "Login finished without storing a key",
+        authenticated ? "info" : "warning",
+      );
     }
+  } catch (err) {
+    cancelled = true;
+    ui.notify(`Login failed: ${err instanceof Error ? err.message : String(err)}`, "error");
   }
 
   if (!authenticated) {

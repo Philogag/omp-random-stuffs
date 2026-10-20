@@ -29,11 +29,11 @@ with an `omp.extensions` array (this package declares `"omp": { "extensions":
 /login-omniroute
 ```
 
-Three steps: point the extension at a gateway, check that it answers
-(`GET /models`), then store an API key through omp's own credential pipeline —
-the same store `/login` writes to, so this extension never persists secrets
-itself. It reports how many models the gateway advertises and how to tune the
-web tools afterwards.
+One step: store an API key through omp's own credential pipeline — the same
+store `/login` writes to, so this extension never persists secrets itself. The
+prompt runs every time, so re-running the command replaces an existing key.
+Afterwards it verifies the gateway (`GET /models`), reports how many models it
+advertises, and points at the web-tool settings.
 
 ### Manual setup
 
