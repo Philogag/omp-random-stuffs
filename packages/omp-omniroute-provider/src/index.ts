@@ -132,7 +132,7 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("login-omniroute", {
-    description: "Store an OmniRoute API key (one step)",
+    description: "Configure the OmniRoute gateway URL and API key",
     handler: async (_args: string, ctx: ExtensionContext) => {
       if (!ctx.hasUI) {
         ctx.ui.notify(
@@ -143,7 +143,11 @@ export default function omnirouteExtension(pi: ExtensionAPI): void {
       }
       await runLoginWizard(ctx, {
         getBaseUrl: currentBaseUrl,
-        configPath: resolveConfigPath,
+        normalizeBaseUrl: validateAndNormalizeBaseUrl,
+        saveBaseUrl: (value) => {
+          setBaseUrl(value);
+          applyBaseUrl();
+        },
         probe: probeGateway,
         getApiKey: () => resolveApiKey(ctx),
         login: () => loginThroughOmp(ctx),

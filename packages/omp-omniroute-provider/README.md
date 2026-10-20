@@ -29,11 +29,13 @@ with an `omp.extensions` array (this package declares `"omp": { "extensions":
 /login-omniroute
 ```
 
-One step: store an API key through omp's own credential pipeline — the same
-store `/login` writes to, so this extension never persists secrets itself. The
-prompt runs every time, so re-running the command replaces an existing key.
-Afterwards it verifies the gateway (`GET /models`), reports how many models it
-advertises, and points at the web-tool settings.
+Two prompts: the gateway URL, prefilled with the live value so an existing base
+URL can be corrected in place, then an API key stored through omp's own
+credential pipeline — the same store `/login` writes to, so this extension never
+persists secrets itself. The key prompt runs every time, so re-running the
+command replaces an existing key. Afterwards it verifies the gateway
+(`GET /models`), reports how many models it advertises, and points at the
+web-tool settings.
 
 ### Manual setup
 
@@ -84,7 +86,7 @@ gateway dropped) is ignored rather than forwarded.
 | config in pi `settings.json` + `auth.json` | one extension-owned `omniroute.json` in the omp agent dir |
 | `typebox` package + `prepareArguments` hook | injected `pi.typebox` schema builder; argument defaults resolved in `execute` |
 | `defineTool` | plain `ToolDefinition` objects built by `createSearchTool` / `createFetchTool` |
-| env-var-only auth (`envApiKeyAuth`) | `/login-omniroute`, a one-step key prompt on top of omp's `authStorage.oauth.login`; `OMNIROUTE_API_KEY` stays the fallback rank |
+| env-var-only auth (`envApiKeyAuth`) | `/login-omniroute`, a prefilled base-URL prompt plus a key prompt on top of omp's `authStorage.oauth.login`; `OMNIROUTE_API_KEY` stays the fallback rank |
 
 ## Cost telemetry
 

@@ -5,14 +5,14 @@
   },
   "metadata": {
     "description": "oh-my-pi extensions by Philogag",
-    "version": "0.1.1"
+    "version": "0.1.2"
   },
   "plugins": [
     {
       "name": "omniroute-provider",
       "source": "./packages/omp-omniroute-provider",
       "description": "OmniRoute (OpenAI-compatible) provider plus web search/fetch tools for oh-my-pi",
-      "version": "0.1.1",
+      "version": "0.1.2",
       "author": {
         "name": "Philogag"
       },

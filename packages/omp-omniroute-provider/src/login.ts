@@ -1,9 +1,10 @@
-// `/login-omniroute` — one-step setup: ask for the API key, store it, verify.
+// `/login-omniroute` — setup: edit the gateway URL (prefilled), ask for the API
+// key, store it, verify.
 //
-// Deliberately not a wizard. The gateway URL has a working default and lives in
-// `/omniroute-settings`, so the only thing standing between a fresh install and
-// a usable provider is the key. Everything is dependency-injected so the flow is
-// testable without a harness runtime.
+// Two prompts, not a wizard. The URL prompt is prefilled with the live value so
+// an already configured gateway can be corrected in place; `/omniroute-settings`
+// still owns the search/fetch provider menus. Everything is dependency-injected
+// so the flow is testable without a harness runtime.
 
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
@@ -18,6 +19,10 @@ const PROBE_TIMEOUT_MS = 8_000;
 
 export interface LoginWizardDeps {
   readonly getBaseUrl: () => string;
+  /** Validates/normalizes an edited URL; throws on malformed input. */
+  readonly normalizeBaseUrl: (value: string) => string;
+  /** Persists the normalized URL and re-registers the provider. */
+  readonly saveBaseUrl: (value: string) => void;
   readonly getApiKey: () => Promise<string | undefined>;
   readonly probe: (baseUrl: string, apiKey: string | undefined) => Promise<GatewayProbe>;
   /**
@@ -26,7 +31,6 @@ export interface LoginWizardDeps {
    */
   readonly login: () => Promise<string | undefined>;
   readonly refreshModels: () => Promise<void>;
-  readonly configPath: () => string;
 }
 
 export interface LoginWizardResult {
@@ -66,18 +70,42 @@ export async function probeGateway(
 }
 
 /**
- * Asks for the key, then reports whether the gateway accepted it.
+ * Asks for the gateway URL (prefilled with the live value), then for the key,
+ * and reports whether the gateway accepted it.
  *
- * The prompt itself belongs to omp (`authStorage.oauth.login`), so the key goes
- * straight into the credential store `/login` uses and this extension never
- * persists a secret. Always prompts, so an existing key can be replaced.
+ * The URL prompt always runs, so an already configured base URL can be edited
+ * here instead of detouring through `/omniroute-settings`. Both prompts belong
+ * to omp (`ui.editor`, `authStorage.oauth.login`), so the key goes straight
+ * into the credential store `/login` uses and this extension never persists a
+ * secret. The key prompt always runs too, so an existing key can be replaced.
  */
 export async function runLoginWizard(
   ctx: ExtensionContext,
   deps: LoginWizardDeps,
 ): Promise<LoginWizardResult> {
   const ui = ctx.ui;
-  const baseUrl = deps.getBaseUrl();
+  let baseUrl = deps.getBaseUrl();
+
+  // `ui.input` only renders a placeholder, so the edit uses the prefilled
+  // editor in prompt style: Enter submits, Esc cancels the whole login.
+  let draft = baseUrl;
+  for (;;) {
+    const entered = await ui.editor("OmniRoute base URL", draft, undefined, { promptStyle: true });
+    if (entered === undefined) return { cancelled: true, baseUrl, authenticated: false };
+    let normalized: string;
+    try {
+      normalized = deps.normalizeBaseUrl(entered);
+    } catch (err) {
+      ui.notify(err instanceof Error ? err.message : String(err), "error");
+      draft = entered;
+      continue;
+    }
+    if (normalized !== baseUrl) {
+      baseUrl = normalized;
+      deps.saveBaseUrl(normalized);
+    }
+    break;
+  }
 
   let authenticated = false;
   let cancelled = false;

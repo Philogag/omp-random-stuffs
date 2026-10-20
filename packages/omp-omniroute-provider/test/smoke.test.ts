@@ -356,16 +356,23 @@ interface FakeUi {
   readonly notifications: Array<{ message: string; type?: string }>;
   readonly selects: Array<readonly string[]>;
   readonly inputs: string[];
+  readonly editors: Array<{ title: string; prefill: string }>;
 }
 
-function fakeCtx(answers: { input?: Array<string | undefined>; select?: Array<string | undefined> }): FakeUi & {
+function fakeCtx(answers: {
+  input?: Array<string | undefined>;
+  select?: Array<string | undefined>;
+  editor?: Array<string | undefined>;
+}): FakeUi & {
   ctx: never;
 } {
   const notifications: Array<{ message: string; type?: string }> = [];
   const selects: Array<readonly string[]> = [];
   const inputs: string[] = [];
+  const editors: Array<{ title: string; prefill: string }> = [];
   let inputIndex = 0;
   let selectIndex = 0;
+  let editorIndex = 0;
   const ctx = {
     hasUI: true,
     ui: {
@@ -376,22 +383,32 @@ function fakeCtx(answers: { input?: Array<string | undefined>; select?: Array<st
         inputs.push(title);
         return answers.input?.[inputIndex++];
       },
+      editor: async (title: string, prefill?: string) => {
+        editors.push({ title, prefill: prefill ?? "" });
+        // An omitted entry accepts the prefill; an explicit undefined cancels.
+        if (answers.editor === undefined || editorIndex >= answers.editor.length) return prefill;
+        return answers.editor[editorIndex++];
+      },
       select: async (title: string, options: Array<{ label: string }>) => {
         selects.push([title, ...options.map((option) => option.label)]);
         return answers.select?.[selectIndex++];
       },
     },
   };
-  return { notifications, selects, inputs, ctx: ctx as never };
+  return { notifications, selects, inputs, editors, ctx: ctx as never };
 }
 
 function wizardDeps(overrides: Partial<Parameters<typeof runLoginWizard>[1]> = {}) {
   const probes: Array<{ baseUrl: string; apiKey: string | undefined }> = [];
+  const saves: string[] = [];
   const counts = { logins: 0, refreshes: 0 };
   let key: string | undefined;
   const base: Parameters<typeof runLoginWizard>[1] = {
     getBaseUrl: () => "http://localhost:20128/v1",
-    configPath: () => "/tmp/omniroute.json",
+    normalizeBaseUrl: (value) => value.trim().replace(/\/+$/, ""),
+    saveBaseUrl: (value) => {
+      saves.push(value);
+    },
     getApiKey: async () => key,
     probe: async (baseUrl, apiKey) => {
       probes.push({ baseUrl, apiKey });
@@ -407,16 +424,19 @@ function wizardDeps(overrides: Partial<Parameters<typeof runLoginWizard>[1]> = {
     },
     ...overrides,
   };
-  return { deps: base, probes, counts };
+  return { deps: base, probes, saves, counts };
 }
 
-test("login: one step — asks for the key, verifies it, refreshes models", async () => {
-  const { ctx, notifications, selects, inputs } = fakeCtx({});
-  const { deps, probes, counts } = wizardDeps();
+test("login: prefilled URL prompt, then the key prompt, verify, refresh", async () => {
+  const { ctx, notifications, selects, inputs, editors } = fakeCtx({});
+  const { deps, probes, saves, counts } = wizardDeps();
 
   const result = await runLoginWizard(ctx, deps);
 
   assert.deepEqual(result, { cancelled: false, baseUrl: "http://localhost:20128/v1", authenticated: true, modelCount: 3 });
+  // URL prompt is prefilled with the live value; accepting it writes nothing.
+  assert.deepEqual(editors, [{ title: "OmniRoute base URL", prefill: "http://localhost:20128/v1" }]);
+  assert.deepEqual(saves, []);
   // No wizard steps: the key prompt belongs to omp's own login flow.
   assert.deepEqual(selects, []);
   assert.deepEqual(inputs, []);
@@ -424,6 +444,48 @@ test("login: one step — asks for the key, verifies it, refreshes models", asyn
   assert.deepEqual(probes, [{ baseUrl: "http://localhost:20128/v1", apiKey: "stored-key" }]);
   assert.ok(notifications.some((n) => n.message.includes("API key stored (omp auth store)")));
   assert.ok(notifications.some((n) => n.message.includes("OmniRoute is ready — 3 models available")));
+});
+
+test("login: an edited base URL is saved and probed instead of the old one", async () => {
+  const { ctx, editors } = fakeCtx({ editor: ["https://gw.example.com/v1/"] });
+  const { deps, probes, saves } = wizardDeps();
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.baseUrl, "https://gw.example.com/v1");
+  assert.deepEqual(editors, [{ title: "OmniRoute base URL", prefill: "http://localhost:20128/v1" }]);
+  assert.deepEqual(saves, ["https://gw.example.com/v1"]);
+  assert.deepEqual(probes, [{ baseUrl: "https://gw.example.com/v1", apiKey: "stored-key" }]);
+});
+
+test("login: cancelling the base URL prompt aborts before the key prompt", async () => {
+  const { ctx } = fakeCtx({ editor: [undefined] });
+  const { deps, probes, saves, counts } = wizardDeps();
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.deepEqual(result, { cancelled: true, baseUrl: "http://localhost:20128/v1", authenticated: false });
+  assert.deepEqual(probes, []);
+  assert.deepEqual(saves, []);
+  assert.deepEqual(counts, { logins: 0, refreshes: 0 });
+});
+
+test("login: an invalid base URL re-prompts with the rejected text", async () => {
+  const { ctx, notifications, editors } = fakeCtx({ editor: ["not a url", "https://gw.example.com/v1"] });
+  const { deps, saves } = wizardDeps({
+    normalizeBaseUrl: (value) => {
+      if (!/^https?:\/\//.test(value)) throw new Error(`Invalid base URL: ${JSON.stringify(value)}`);
+      return value;
+    },
+  });
+
+  const result = await runLoginWizard(ctx, deps);
+
+  assert.equal(result.baseUrl, "https://gw.example.com/v1");
+  assert.equal(editors.length, 2);
+  assert.equal(editors[1]?.prefill, "not a url");
+  assert.deepEqual(saves, ["https://gw.example.com/v1"]);
+  assert.ok(notifications.some((n) => n.type === "error" && n.message.includes("Invalid base URL")));
 });
 
 test("login: an existing key is replaced — the prompt always runs", async () => {
